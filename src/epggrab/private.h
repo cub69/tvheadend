@@ -155,6 +155,14 @@ int  xmltv_parse_accessibility
 size_t freesat_huffman_decode
   (char *dst, size_t* dstlen, const uint8_t *src, size_t srclen);
 
+/* NAEIT huffman decoder */
+size_t naeit_huffman_decode
+  (char *dst, size_t* dstlen, const uint8_t *src, size_t srclen);
+
+#define SIZE_TABLE_128 128
+#define SIZE_TABLE_255 255
+
+//#define EPG_EIT_TRACE
 /* **************************************************************************
  * Module setup(s)
  * *************************************************************************/

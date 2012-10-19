@@ -53,6 +53,14 @@
 #define DVB_DESC_EAC3         0x7a
 #define DVB_DESC_AAC          0x7c
 #define DVB_DESC_LOCAL_CHAN   0x83
+/* custom descriptors for North America */
+
+#define DISH_DVB_DESC_MPAA    0x89  //Stars and MPAA ratings & advisories  
+#define DISH_DVB_DESC_NAME    0x91  //huffman encoded
+#define DISH_DVB_DESC_DESCRIPT 0x92  //huffman encoded
+#define DISH_DVB_DESC_VCHIP   0x95  //VCHIP ratings & advisories
+#define DISH_DVB_DESC_PROGID  0x96  //Series ID, program ID and original air date
+#define DISH_DVB_DESC_CODED   0x8b  // unknown type
 
 typedef struct dvb_string_conv
 {

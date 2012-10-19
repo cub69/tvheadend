@@ -175,7 +175,7 @@ typedef struct eit_event
 // Dump a descriptor tag for debug (looking for new tags etc...)
 static void _eit_dtag_dump ( epggrab_module_t *mod, uint8_t dtag, uint8_t dlen, uint8_t *buf )
 {
-#if APS_DEBUG
+//#if APS_DEBUG
   int i = 0, j = 0;
   char tmp[100];
   tvhlog(LOG_DEBUG, mod->id, "  dtag 0x%02X len %d", dtag, dlen);
@@ -187,7 +187,7 @@ static void _eit_dtag_dump ( epggrab_module_t *mod, uint8_t dtag, uint8_t dlen, 
       j = 0;
     }
   }
-#endif
+//#endif
 }
 
 /* ************************************************************************
@@ -196,6 +196,16 @@ static void _eit_dtag_dump ( epggrab_module_t *mod, uint8_t dtag, uint8_t dlen, 
 
 static dvb_string_conv_t _eit_freesat_conv[2] = {
   { 0x1f, freesat_huffman_decode },
+  { 0x00, NULL }
+};
+
+static dvb_string_conv_t _eit_dish_conv[2] = {
+  { 0xff, naeit_huffman_decode },
+  { 0x00, NULL }
+};
+
+static dvb_string_conv_t _eit_bell_conv[2] = {
+  { 0x1f, naeit_huffman_decode },
   { 0x00, NULL }
 };
 
@@ -212,14 +222,32 @@ static int _eit_get_string_with_len
   /* Enable huffman decode (for freeview and/or freesat) */
   m = epggrab_module_find_by_id("uk_freesat");
   if (m && m->enabled) cptr = _eit_freesat_conv;
-  else
-    m = epggrab_module_find_by_id("uk_freeview");
-    if (m && m->enabled) cptr = _eit_freesat_conv;
-
+  m = epggrab_module_find_by_id("uk_freeview");
+  if (m && m->enabled) cptr = _eit_freesat_conv;
+  m = epggrab_module_find_by_id("na_dish");
+  if (m && m->enabled) cptr = _eit_dish_conv;
+  m = epggrab_module_find_by_id("na_bell");
+  if (m && m->enabled) cptr = _eit_bell_conv;
+ 
   /* Convert */
+
   return dvb_get_string_with_len(dst, dstlen, src, srclen, charset, cptr);
 }
 
+/*
+ * Get string from Dish non-huffman
+ */
+static int _eit_dish_get_string_with_len
+  ( epggrab_module_t *m,
+    char *dst, size_t dstlen, 
+		const uint8_t *src, size_t srclen, const char *charset )
+{
+  dvb_string_conv_t *cptr = NULL;
+
+  /* Convert */
+
+  return dvb_get_string_with_len(dst, dstlen, src, srclen, charset, cptr);
+}
 /*
  * Short Event - 0x4d
  */
@@ -490,6 +518,156 @@ static int _eit_desc_crid
   return 0;
 }
 
+/*
+ * Dish Networks Short Event - 0x91
+ */
+static int _eit_dish_desc_short_event
+  ( epggrab_module_t *mod, uint8_t *ptr, int len, eit_event_t *ev )
+{
+  int r;
+  char lang[4];
+  char buf[256];
+  char dtype = ptr[len+1];
+  if ( len < 5 ) return -1;
+  buf[0] = dtype;
+  len += 3;
+  ptr -= 3;
+  	
+  /* Title */
+  if ( (r = _eit_get_string_with_len(mod, buf, sizeof(buf),
+                                     ptr, len, ev->default_charset)) < 0 ) {
+    return -1;
+  } else {
+    if (!ev->title) ev->title = lang_str_create();
+    lang_str_add(ev->title, buf, lang, 0);
+  }
+  len -= r;
+  ptr += r;
+  if ( len < 1 ) return -1;
+  len += 5;
+  ptr -= 5;
+  buf[0] = dtype;
+  /* Summary */
+  if ( (r = _eit_get_string_with_len(mod, buf, sizeof(buf),
+                                     ptr, len, ev->default_charset)) < 0 ) {
+    return -1;
+  } else {
+    if (!ev->summary) ev->summary = lang_str_create();
+    lang_str_add(ev->summary, buf, lang, 0);
+  }
+  return 0;
+}
+
+/*
+ * Dish Extended Event - 0x92
+ */
+static int _eit_dish_desc_ext_event
+  ( epggrab_module_t *mod, uint8_t *ptr, int len, eit_event_t *ev )
+{
+  char buf[256];
+  char lang[4];
+  
+  if (len < 5) return -1;
+  buf[0] = ptr[len+1];
+
+  /* Descriptor numbering (skip) */
+  len += 3;
+  ptr -= 3;
+tvhlog(LOG_DEBUG, mod->id, "Extended Event - ptr[0]: %d, ptr[1]: %d",ptr[0],ptr[1]);
+
+  /* Description */
+  if ( _eit_get_string_with_len(mod,
+                                buf, sizeof(buf),
+                                ptr, len,
+                                ev->default_charset) < 0 ) {
+    return -1;
+  } else {
+    if (!ev->desc) ev->desc = lang_str_create();
+    lang_str_append(ev->desc, buf, lang);
+  }
+
+  return 0;
+}
+
+/*
+ * Content ID - 0x96
+ */
+static int _eit_dish_desc_crid
+  ( epggrab_module_t *mod, uint8_t *ptr, int len, eit_event_t *ev, service_t *svc )
+{
+  int r;
+  uint8_t type;
+  char buf[257], *crid;
+  int clen;
+  const unsigned char *data = ptr;
+  //data +=2;
+  if ( data[0] == 0x7c || data[0] == 0x7d || data[0] == 0x7e) {
+    int series = (data[1] << 0x12) | (data[2] << 0x0a) | (data[3] << 0x02) | ((data[4] & 0xc0) >> 0x06);
+    int episode = ((data[4] & 0x3f) << 0x08) | data[5];
+    const char* prefix;
+    if (data[0] == 0x7c)
+      prefix = "MV";
+    else if (data[0] == 0x7d)
+      prefix = "SP";
+    else if (data[0] == 0x7e)
+      prefix = "EP";
+    else
+      prefix ="";
+
+    char programId[17];
+    char seriesId[11];
+
+    sprintf(programId, "%s%08d%04d", (data[0] == 0x7e && episode == 0 ? "SH" : prefix), series, episode);
+
+    if (data[0] == 0x7e) {
+      sprintf(seriesId, "%s%08d", prefix, series);
+    }
+
+    tvhlog(LOG_DEBUG,"NAEIT","ProgramID: %s, SeriesID: %s",programId, seriesId);
+
+  }
+return 0;
+
+    /* Explicit only */
+ //   if ( (*ptr & 0x3) == 0 ) {
+      crid = NULL;
+      type = *ptr >> 2;
+
+      r = _eit_dish_get_string_with_len(mod, buf, sizeof(buf),
+                                   ptr, len,
+                                   ev->default_charset);
+      if (r < 0) return -1;
+
+      /* Episode */
+      if (type == 0x1 || type == 0x31) {
+        crid = ev->uri;
+        clen = sizeof(ev->uri);
+
+      /* Season */
+      } else if (type == 0x2 || type == 0x32) {
+        crid = ev->suri;
+        clen = sizeof(ev->suri);
+      }
+ 	tvhlog(LOG_DEBUG,"NAEIT","crid: %s,len %d",crid,len);
+  
+      if (crid) {
+        if (strstr(buf, "crid://") == buf) {
+          strncpy(crid, buf, clen);
+        } else if ( *buf != '/' ) {
+          snprintf(crid, clen, "crid://%s", buf);
+        } else {
+          char *defauth = svc->s_default_authority;
+          if (!defauth)
+            defauth = svc->s_dvb_mux_instance->tdmi_default_authority;
+          if (defauth)
+            snprintf(crid, clen, "crid://%s%s", defauth, buf);
+        }
+      }
+//    }
+      /* Next */
+    
+  return 0;
+}
 
 /* ************************************************************************
  * EIT Event
@@ -557,6 +735,7 @@ static int _eit_process_event
     dllen -= 2;
     ptr   += 2;
     if (dllen < dlen) break;
+	tvhlog(LOG_DEBUG, mod->id, "dllen: %d, dlen: %d     Processing dtag:0x%02X                 r:%d",dllen,dlen,dtag,r);
 
     switch (dtag) {
       case DVB_DESC_SHORT_EVENT:
@@ -566,6 +745,8 @@ static int _eit_process_event
         r = _eit_desc_ext_event(mod, ptr, dlen, &ev);
         break;
       case DVB_DESC_CONTENT:
+	        _eit_dtag_dump(mod, dtag, dlen, ptr);
+        break;
         r = _eit_desc_content(mod, ptr, dlen, &ev);
         break;
       case DVB_DESC_COMPONENT:
@@ -575,18 +756,35 @@ static int _eit_process_event
         r = _eit_desc_parental(mod, ptr, dlen, &ev);
         break;
       case DVB_DESC_CRID:
-        r = _eit_desc_crid(mod, ptr, dlen, &ev, svc);
+//        r = _eit_desc_crid(mod, ptr, dlen, &ev, svc);
         break;
+      case DISH_DVB_DESC_MPAA:
+//        r = _eit_desc_parental(mod, ptr, dlen, &ev);
+	break;
+      case DISH_DVB_DESC_NAME:
+        ptr[dlen+1] = tableid;
+        r = _eit_dish_desc_short_event(mod, ptr, dlen, &ev);
+        break;
+      case DISH_DVB_DESC_DESCRIPT:
+        ptr[dlen+1] = tableid;
+        r = _eit_dish_desc_ext_event(mod, ptr, dlen, &ev);
+        break;
+      case DISH_DVB_DESC_PROGID:
+  	r = _eit_dish_desc_crid(mod, ptr, dlen, &ev, svc);
+        break;
+      case DISH_DVB_DESC_CODED:
+	// unkwown type
+	break;
       default:
         r = 0;
         _eit_dtag_dump(mod, dtag, dlen, ptr);
         break;
     }
-
-    if (r < 0) break;
+ //   if (r < 0) break;
     dllen -= dlen;
     ptr   += dlen;
   }
+	tvhlog(LOG_DEBUG, mod->id, "-----------------------------------------------");
 
   /*
    * Broadcast
@@ -669,7 +867,7 @@ static int _eit_callback
   uint16_t sec, lst, seg, ver;
 
   /* Invalid */
-  if(tableid < 0x4e || tableid > 0x6f || len < 11) return -1;
+  if((tableid < 0x4e || tableid > 0x6f || len < 11) && (tableid < 0x81 || tableid > 0xa4 || len < 11)) return -1;
 
   /* Get OTA */
   ota = epggrab_ota_find((epggrab_module_ota_t*)mod, tdmi);
@@ -698,9 +896,21 @@ static int _eit_callback
          tableid, onid, tsid, sid, sec, lst, seg, ver, ptr[2] & 1);
 #endif
 
-  /* Don't process */
-  if((ptr[2] & 1) == 0) return 0;
+  /* Don't process - work around for NA - hack needs fixing*/
+//  if((ptr[2] & 1) == 0) return 0;
 
+/* Switch Network ID's since all EIT comes in from one onid for multiple onids   */
+
+  if(onid == 0x100 && tsid > 100) { // Bell TV - one EIT feed for two sats
+    onid = 0x101;
+  }
+  if (onid > 0x1001 && onid < 0x1009) {  // Dish Networks - one EIT feed for many sats
+//    if (tsid > 100 && tsid < 200)  //Dish 61.5
+//      onid = 0x1002;
+//    if (tsid > 900 && tsid < 900)  // Dish 72.5
+      onid = 0x1005;
+  }
+  
   /* Current status */
   tsta = eit_status_find(sta, tableid, onid, tsid, sid, sec, lst, seg, ver);
 #ifdef EPG_EIT_TRACE
@@ -718,12 +928,12 @@ static int _eit_callback
   } else {
     if (tdmi->tdmi_transport_stream_id != tsid ||
         tdmi->tdmi_network_id != onid) {
-#ifdef EPG_EIT_TRACE
+//#ifdef EPG_EIT_TRACE
       tvhlog(LOG_DEBUG, mod->id,
              "invalid transport id found tid 0x%02X, onid:tsid %d:%d != %d:%d",
              tableid, tdmi->tdmi_network_id, tdmi->tdmi_transport_stream_id,
              onid, tsid);
-#endif
+//#endif
       tdmi = NULL;
     }
   }
@@ -848,7 +1058,14 @@ static void _eit_start
   /* Viasat Baltic (0x39) */
   } else if (!strcmp("viasat_baltic", m->id)) {
     tdt_add(tdmi, NULL, _eit_callback, m, m->id, TDT_CRC, 0x39, NULL);
-
+  /* North America Bell TV (0x441)  */
+  } else if (!strcmp("na_bell", m->id)) {
+//	tdt_add(tdmi, NULL, dvb_pidx11_callback, m, m->id, TDT_CRC, 0x441, NULL);
+        tdt_add(tdmi, NULL, _eit_callback, m, m->id, TDT_CRC, 0x441, NULL);
+  /* North America Dish Networks (0x300) */
+  } else if (!strcmp("na_dish", m->id)) {
+//        tdt_add(tdmi, NULL, dvb_pidx11_callback, m, m->id, TDT_CRC, 0x300, NULL);
+        tdt_add(tdmi, NULL, _eit_callback, m, m->id, TDT_CRC, 0x300, NULL);
   /* Standard (0x12) */
   } else {
     tdt_add(tdmi, NULL, _eit_callback, m, m->id, TDT_CRC, 0x12, NULL);
@@ -876,6 +1093,14 @@ static int _eit_enable ( void *m, uint8_t e )
       epggrab_ota_create_and_register_by_id((epggrab_module_ota_t*)mod,
                                             0, 2315,
                                             600, 3600, "Freesat");
+    } else if (!strcmp(mod->id, "na_bell")) {
+      epggrab_ota_create_and_register_by_id((epggrab_module_ota_t*)mod,
+                                            0, 1,
+                                            600, 3600, "Nimiq 91");    
+    } else if (!strcmp(mod->id, "na_dish")) {
+      epggrab_ota_create_and_register_by_id((epggrab_module_ota_t*)mod,
+                                            0, 921,
+                                            600, 3600, "EchoStar 72.7 West");
     }
   /* Remove all links */
   } else {
@@ -895,6 +1120,10 @@ void eit_init ( void )
                             _eit_start, _eit_enable, NULL);
   epggrab_module_ota_create(NULL, "viasat_baltic", "VIASAT: Baltic", 5,
                             _eit_start, _eit_enable, NULL);
+  epggrab_module_ota_create(NULL, "na_bell", "NA: Bell", 5,
+                            _eit_start, _eit_enable, NULL);
+  epggrab_module_ota_create(NULL, "na_dish", "NA: Dish", 5,
+                            _eit_start, _eit_enable, NULL);  
 }
 
 void eit_load ( void )

@@ -215,7 +215,7 @@ dvb_get_string(char *dst, size_t dstlen, const uint8_t *src, size_t srclen, cons
 
   /* Check custom conversion */
   while (conv && conv->func) {
-    if (conv->type == src[0])
+    if ((conv->type == src[0]) || (conv->type == 0xff))
       return conv->func(dst, &dstlen, src, srclen);
     conv++;
   }
@@ -301,13 +301,14 @@ dvb_get_string_with_len(char *dst, size_t dstlen,
 			const uint8_t *buf, size_t buflen, const char *dvb_charset,
       dvb_string_conv_t *conv)
 {
-  int l = buf[0];
+  int l=buf[0];
+  
+tvhlog(LOG_DEBUG,"NAEIT","value l:%d  buflen: %d",l,buflen);
 
-  if(l + 1 > buflen)
-    return -1;
-
+  if(l + 1 > buflen && conv->type != 0xff)
+       return -1;
   if(dvb_get_string(dst, dstlen, buf + 1, l, dvb_charset, conv))
-    return -1;
+     return -1;
 
   return l + 1;
 }
